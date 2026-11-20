@@ -1,0 +1,74 @@
+
+# =========================
+# Environment variables
+# =========================
+.env
+.env.*
+!.env.example
+
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+
+# =========================
+# Virtual environments
+# =========================
+.venv/
+venv/
+env/
+
+# =========================
+# IDE and editors
+# =========================
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# =========================
+# SQLite databases
+# =========================
+*.db
+*.sqlite
+*.sqlite3
+
+# =========================
+# Generated reports
+# =========================
+*_report.txt
+*.log
+
+# =========================
+# Streamlit
+# =========================
+.streamlit/secrets.toml
+
+# =========================
+# OS files
+# =========================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# =========================
+# Testing and coverage
+# =========================
+.pytest_cache/
+.coverage
+htmlcov/
+
+.env
+**/.env
+!.env.example
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.db
+*.sqlite3
