@@ -1,11 +1,14 @@
 
 import asyncio
+from pathlib import Path
 
 from langchain.agents import create_agent
 from langchain.messages import HumanMessage
 from langchain.mcp import MCPAdapter
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from llm import llm
+
 
 SYSTEM_PROMPT = """You are a GPA/CGPA assistant for a PUCIT BS(CS) student.
 
@@ -31,55 +34,147 @@ Be concise and conversational.
 
 MCP_SERVER_URL = "http://127.0.0.1:8000/mcp"
 
+DB_PATH = Path(__file__).resolve().parent / "memory.sqlite"
 
-async def build_agent():
-    """Connect to the MCP server and load its tools."""
 
+async def list_threads(memory):
+    """Return the names of all saved conversation threads."""
+
+    threads = []
+
+    async for checkpoint in memory.alist(None):
+        thread_id = checkpoint.config["configurable"]["thread_id"]
+
+        if thread_id not in threads:
+            threads.append(thread_id)
+
+    return threads
+
+
+async def show_history(app, config):
+    """Display the saved conversation for the current thread."""
+
+    state = await app.aget_state(config)
+    messages = state.values.get("messages", [])
+
+    if not messages:
+        print("No conversation history found.")
+        return
+
+    print("\n--- Conversation History ---")
+
+    for message in messages:
+        role = message.type.upper()
+        content = message.content
+        print(f"{role}: {content}")
+
+    print("----------------------------")
+
+
+async def main():
+
+    # Connect to the MCP server
     async with MCPAdapter(MCP_SERVER_URL) as adapter:
+
         tools = await adapter.list_tools()
 
         print("Connected to MCP server.")
-        print("Available MCP tools:")
 
-        for tool in tools:
-            print("-", tool.name)
+        # Open persistent SQLite memory
+        async with AsyncSqliteSaver.from_conn_string(
+            str(DB_PATH)
+        ) as memory:
 
-        agent = create_agent(
-            model=llm,
-            tools=tools,
-            system_prompt=SYSTEM_PROMPT
-        )
+            # Create agent with SQLite checkpointer
+            app = create_agent(
+                model=llm,
+                tools=tools,
+                system_prompt=SYSTEM_PROMPT,
+                checkpointer=memory
+            )
 
-        return agent
+            # Display existing conversations
+            saved_chats = await list_threads(memory)
 
+            print("\nSaved conversations:")
 
-async def chat():
-    """Chat with the GPA assistant using MCP tools."""
+            if saved_chats:
+                for chat_name in saved_chats:
+                    print("-", chat_name)
+            else:
+                print("No saved conversations yet.")
 
-    agent = await build_agent()
-    messages = []
+            # Ask who is chatting
+            name = input("\nWho is chatting? ").strip()
 
-    print("\nPUCIT GPA Assistant — type 'quit' to exit.")
+            while not name:
+                name = input("Please enter a name: ").strip()
 
-    while True:
-        user_input = input("\nYou: ").strip()
+            config = {
+                "configurable": {
+                    "thread_id": name
+                }
+            }
 
-        if user_input.lower() in ("quit", "exit"):
-            break
+            print(f"\nWelcome, {name}!")
+            print("Commands: /switch, /history, /forget, /quit")
 
-        messages.append(HumanMessage(content=user_input))
+            # Chat loop
+            while True:
 
-        try:
-            result = await agent.ainvoke({"messages": messages})
+                user_input = input("\nYou: ").strip()
 
-            messages = result["messages"]
+                if not user_input:
+                    continue
 
-            print("Agent:", messages[-1].text)
+                if user_input.lower() in ("/quit", "quit", "exit"):
+                    print("Goodbye!")
+                    break
 
-        except Exception as e:
-            print(f"Agent: Something went wrong: {e}")
-            messages.pop()
+                elif user_input.lower() == "/switch":
+
+                    name = input("Enter the other person's name: ").strip()
+
+                    if not name:
+                        print("Name cannot be empty.")
+                        continue
+
+                    config = {
+                        "configurable": {
+                            "thread_id": name
+                        }
+                    }
+
+                    print(f"Switched to {name}'s conversation.")
+
+                elif user_input.lower() == "/history":
+
+                    await show_history(app, config)
+
+                elif user_input.lower() == "/forget":
+
+                    await memory.adelete_thread(name)
+
+                    print(f"Conversation history for {name} deleted.")
+
+                else:
+
+                    try:
+                        # Send ONLY the new message
+                        result = await app.ainvoke(
+                            {
+                                "messages": [
+                                    HumanMessage(content=user_input)
+                                ]
+                            },
+                            config=config
+                        )
+
+                        print("Agent:", result["messages"][-1].text)
+
+                    except Exception as e:
+                        print(f"Agent error: {e}")
 
 
 if __name__ == "__main__":
-    asyncio.run(chat())
+    asyncio.run(main())
