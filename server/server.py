@@ -8,6 +8,7 @@ from fastmcp import FastMCP
 AGENT_DIR = Path(__file__).resolve().parent.parent / "agent"
 sys.path.insert(0, str(AGENT_DIR))
 
+
 from tools import (
     marks_to_grade_points,
     calculate_semester_gpa,
