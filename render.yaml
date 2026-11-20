@@ -1,0 +1,12 @@
+
+services:
+  - type: web
+    name: pucit-gpa-mcp
+    runtime: python
+    plan: free
+    branch: feature/streaming
+    buildCommand: pip install -r requirements.txt
+    startCommand: python server/server.py
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.14.5

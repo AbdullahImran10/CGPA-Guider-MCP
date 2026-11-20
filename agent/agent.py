@@ -1,7 +1,7 @@
 
 import asyncio
 from pathlib import Path
-
+import os
 from langchain.agents import create_agent
 from langchain.messages import HumanMessage
 from langchain.mcp import MCPAdapter
@@ -32,7 +32,10 @@ Rules you must always follow:
 Be concise and conversational.
 """
 
-MCP_SERVER_URL = "http://127.0.0.1:8000/mcp"
+MCP_SERVER_URL = os.getenv(
+    "MCP_SERVER_URL",
+    "http://127.0.0.1:8000/mcp"
+)
 
 DB_PATH = Path(__file__).resolve().parent / "memory.sqlite"
 
