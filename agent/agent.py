@@ -38,7 +38,7 @@ DB_PATH = Path(__file__).resolve().parent / "memory.sqlite"
 
 
 async def list_threads(memory):
-    """Return the names of all saved conversation threads."""
+    """Return all saved conversation thread IDs."""
 
     threads = []
 
@@ -52,7 +52,7 @@ async def list_threads(memory):
 
 
 async def show_history(app, config):
-    """Display the saved conversation for the current thread."""
+    """Display conversation history."""
 
     state = await app.aget_state(config)
     messages = state.values.get("messages", [])
@@ -64,28 +64,26 @@ async def show_history(app, config):
     print("\n--- Conversation History ---")
 
     for message in messages:
-        role = message.type.upper()
-        content = message.content
-        print(f"{role}: {content}")
+        print(f"{message.type.upper()}: {message.content}")
 
     print("----------------------------")
 
 
 async def main():
 
-    # Connect to the MCP server
+    # Connect to MCP server
     async with MCPAdapter(MCP_SERVER_URL) as adapter:
 
         tools = await adapter.list_tools()
 
         print("Connected to MCP server.")
 
-        # Open persistent SQLite memory
+        # Open SQLite memory
         async with AsyncSqliteSaver.from_conn_string(
             str(DB_PATH)
         ) as memory:
 
-            # Create agent with SQLite checkpointer
+            # Create agent with persistent memory
             app = create_agent(
                 model=llm,
                 tools=tools,
@@ -93,7 +91,7 @@ async def main():
                 checkpointer=memory
             )
 
-            # Display existing conversations
+            # Show saved conversations
             saved_chats = await list_threads(memory)
 
             print("\nSaved conversations:")
@@ -104,7 +102,7 @@ async def main():
             else:
                 print("No saved conversations yet.")
 
-            # Ask who is chatting
+            # Select user
             name = input("\nWho is chatting? ").strip()
 
             while not name:
@@ -160,20 +158,36 @@ async def main():
                 else:
 
                     try:
-                        # Send ONLY the new message
-                        result = await app.ainvoke(
-                            {
-                                "messages": [
-                                    HumanMessage(content=user_input)
-                                ]
-                            },
-                            config=config
-                        )
+                        print("Agent: ", end="", flush=True)
 
-                        print("Agent:", result["messages"][-1].text)
+                        async for message, metadata in app.astream(
+                            {"messages": [HumanMessage(content=user_input)]},
+                            config=config,
+                            stream_mode="messages"
+                        ):
+
+                            # Accept AI messages and AI message chunks
+                            if message.type not in ("ai", "AIMessageChunk"):
+                                continue
+
+                            content = message.content
+
+                            if isinstance(content, str):
+                                print(content, end="", flush=True)
+
+                            elif isinstance(content, list):
+                                for block in content:
+                                    if isinstance(block, dict) and block.get("type") == "text":
+                                        print(
+                                            block.get("text", ""),
+                                            end="",
+                                            flush=True
+                                        )
+
+                        print()
 
                     except Exception as e:
-                        print(f"Agent error: {e}")
+                        print(f"\nAgent error: {e}")
 
 
 if __name__ == "__main__":
