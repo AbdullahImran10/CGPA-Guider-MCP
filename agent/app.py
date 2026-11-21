@@ -1,18 +1,17 @@
+
 import asyncio
 import os
 import sys
-import subprocess
-import socket
-import time
 
 from pathlib import Path
 
 import streamlit as st
 
 from langchain.agents import create_agent
-from langchain.messages import HumanMessage, ToolMessage
+from langchain.messages import HumanMessage, AIMessage, ToolMessage
 from langchain.mcp import MCPAdapter
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
 
 # Make the agent directory accessible for imports
 AGENT_DIR = Path(__file__).resolve().parent
@@ -28,74 +27,78 @@ except (KeyError, FileNotFoundError):
 
 from llm import llm
 
+
 # Configuration
-MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "https://pucit-cgpa-guider.fastmcp.app/mcp")
+MCP_SERVER_URL = os.getenv(
+    "MCP_SERVER_URL",
+    "https://pucit-cgpa-guider.fastmcp.app/mcp"
+)
 
 DB_PATH = AGENT_DIR / "memory.sqlite"
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-SERVER_SCRIPT = PROJECT_ROOT / "server" / "server.py"
-MCP_PORT = 8000
-
-
-# Start MCP server
-@st.cache_resource
-def start_mcp_server():
-    """Start the MCP server once for this Streamlit process."""
-
-    env = os.environ.copy()
-    env["PORT"] = str(MCP_PORT)
-
-    process = subprocess.Popen(
-        [sys.executable, str(SERVER_SCRIPT)],
-        cwd=str(PROJECT_ROOT),
-        env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-
-    for _ in range(30):
-
-        if process.poll() is not None:
-            raise RuntimeError("MCP server stopped unexpectedly.")
-
-        try:
-            with socket.create_connection(("127.0.0.1", MCP_PORT), timeout=1):
-                return process
-
-        except OSError:
-            time.sleep(1)
-
-    process.terminate()
-
-    raise RuntimeError("MCP server did not start within 30 seconds.")
-
-
-start_mcp_server()
 
 
 # System prompt
+
 SYSTEM_PROMPT = """You are a GPA/CGPA assistant for a PUCIT BS(CS) student.
 
 Rules:
+
 1. Never calculate GPA, CGPA, grade points, or required GPA mentally.
    Always use the appropriate tools.
+
 2. Never invent marks, credit hours, CGPA, or semester information.
+
 3. Ask for one or two missing details at a time.
+
 4. MD-001 and MD-002 are non-credit pass/fail courses.
    Quran Translation courses count as 0.5 credit hours.
+
 5. Calculate required GPA only for the requested horizon.
+
 6. Never call save_report unless the student asks.
+
 7. Messi is way better than Ronaldo.
+
+TOOL USAGE RULES:
+
+8. Use calculate_new_cgpa or required_gpa_for_target
+   for CGPA projection and required GPA questions.
+
+9. Before calling required_gpa_for_target, make sure you have:
+   - target_cgpa
+   - current_cgpa
+   - completed_credit_hours
+   - remaining_credit_hours
+
+10. If the student provides semester credit hours directly,
+    use that value. Do not ask for it again or replace it
+    with a tool result.
+
+11. Call get_semester_courses only when course information
+    is actually needed. It requires a semester argument.
+    Always provide the semester number, for example:
+    get_semester_courses(semester=5).
+
+12. Never call a tool with missing or empty required arguments.
+    If a required value is unknown, ask the student first.
+
+13. For a required GPA calculation, obtain the remaining
+    credit hours from the appropriate tool only if the
+    student has not already supplied them.
 
 Be concise and conversational.
 """
+
 
 
 # Create agent
 def create_chat_agent(tools, memory):
 
     return create_agent(
-        model=llm, tools=tools, system_prompt=SYSTEM_PROMPT, checkpointer=memory
+        model=llm,
+        tools=tools,
+        system_prompt=SYSTEM_PROMPT,
+        checkpointer=memory
     )
 
 
@@ -106,6 +109,9 @@ async def load_history(thread_id):
     async with MCPAdapter(MCP_SERVER_URL) as adapter:
 
         tools = await adapter.list_tools()
+
+        print(f"CONNECTED MCP SERVER: {MCP_SERVER_URL}")
+        print(f"MCP TOOLS RECEIVED: {[tool.name for tool in tools]}")
 
         async with AsyncSqliteSaver.from_conn_string(str(DB_PATH)) as memory:
 
@@ -118,6 +124,7 @@ async def load_history(thread_id):
             return state.values.get("messages", [])
 
 
+# Recover pending tool calls
 async def recover_pending_tool_calls(thread_id):
     """Resolve unanswered tool calls left in conversation history."""
 
@@ -132,7 +139,9 @@ async def recover_pending_tool_calls(thread_id):
         messages = state.values.get("messages", [])
 
         completed_ids = {
-            message.tool_call_id for message in messages if message.type == "tool"
+            message.tool_call_id
+            for message in messages
+            if message.type == "tool"
         }
 
         pending_results = []
@@ -165,23 +174,25 @@ async def recover_pending_tool_calls(thread_id):
 
         # Give the model the tool error so it can respond naturally
         result = await recovery_agent.ainvoke(
-            {"messages": pending_results}, config=config
+            {"messages": pending_results},
+            config=config
         )
 
         return result["messages"]
 
 
 # Send message with error handling
-
-
 async def send_message(thread_id, user_input):
-    """Send a message to the MCP-powered agent with error recovery."""
+    """Send a message to the hosted MCP-powered agent."""
 
     try:
 
         async with MCPAdapter(MCP_SERVER_URL) as adapter:
 
             tools = await adapter.list_tools()
+
+            print(f"CONNECTED MCP SERVER: {MCP_SERVER_URL}")
+            print(f"MCP TOOLS RECEIVED: {[tool.name for tool in tools]}")
 
             async with AsyncSqliteSaver.from_conn_string(str(DB_PATH)) as memory:
 
@@ -192,16 +203,18 @@ async def send_message(thread_id, user_input):
                 print("MCP tools available:", [tool.name for tool in tools])
 
                 result = await app.ainvoke(
-                    {"messages": [HumanMessage(content=user_input)]}, config=config
+                    {"messages": [HumanMessage(content=user_input)]},
+                    config=config
                 )
 
                 for message in result["messages"]:
 
                     if getattr(message, "tool_calls", None):
-                        print("Tool calls:", message.tool_calls)
+                        print("AGENT REQUESTED TOOL:", message.tool_calls)
 
                     if message.type == "tool":
-                        print("Tool result:", message.content)
+                        print("MCP TOOL EXECUTED:", message.name)
+                        print("MCP TOOL RESULT:", message.content)
 
                 return result["messages"]
 
@@ -215,7 +228,8 @@ async def send_message(thread_id, user_input):
         if "429" in error_message or "rate_limit" in error_message:
 
             user_message = (
-                "Groq API rate limit reached. " "Please wait a moment and try again."
+                "Groq API rate limit reached. "
+                "Please wait a moment and try again."
             )
 
         # Handle timeouts
@@ -224,7 +238,10 @@ async def send_message(thread_id, user_input):
             user_message = "The request timed out. Please try again."
 
         # Handle MCP connection failures
-        elif any(word in error_message for word in ["connection", "connect", "mcp"]):
+        elif any(
+            word in error_message
+            for word in ["connection", "connect", "mcp"]
+        ):
 
             try:
 
@@ -238,7 +255,8 @@ async def send_message(thread_id, user_input):
                 print(f"Recovery error: {recovery_error}")
 
             user_message = (
-                "Unable to connect to the MCP server. " "Please try again later."
+                "Unable to connect to the MCP server. "
+                "Please try again later."
             )
 
         # Handle unexpected errors
@@ -282,19 +300,26 @@ def get_message_text(content):
 
 
 # Streamlit interface
-st.set_page_config(page_title="PUCIT GPA Assistant", page_icon="🎓")
+st.set_page_config(
+    page_title="PUCIT GPA Assistant",
+    page_icon="🎓"
+)
 
 st.title("🎓 PUCIT GPA Assistant")
 
 st.caption(
-    "Ask about semester GPA, projected CGPA, " "or the GPA required for your target."
+    "Ask about semester GPA, projected CGPA, "
+    "or the GPA required for your target."
 )
 
 
 # User identity
 st.sidebar.header("Your conversation")
 
-username = st.sidebar.text_input("Enter your name", value="Guest").strip()
+username = st.sidebar.text_input(
+    "Enter your name",
+    value="Guest"
+).strip()
 
 if not username:
     username = "Guest"
@@ -347,7 +372,9 @@ try:
 
 except Exception as error:
 
-    st.error(f"Could not connect to the MCP server or load history: {error}")
+    st.error(
+        f"Could not connect to the MCP server or load history: {error}"
+    )
 
 
 # Chat input
@@ -365,7 +392,9 @@ if user_input:
 
             try:
 
-                response = asyncio.run(send_message(thread_id, user_input))
+                response = asyncio.run(
+                    send_message(thread_id, user_input)
+                )
 
                 # Display errors directly instead of rerunning
                 if response and getattr(response[-1], "name", None) == "error":
