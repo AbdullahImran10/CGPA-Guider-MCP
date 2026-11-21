@@ -25,7 +25,7 @@ try:
 except (KeyError, FileNotFoundError):
     pass
 
-
+ 
 from llm import llm
 
 # Configuration
@@ -182,6 +182,8 @@ async def send_message(thread_id, user_input):
         async with MCPAdapter(MCP_SERVER_URL) as adapter:
 
             tools = await adapter.list_tools()
+            print(f"CONNECTED MCP SERVER: {MCP_SERVER_URL}")
+            print(f"MCP TOOLS RECEIVED: {[tool.name for tool in tools]}")
 
             async with AsyncSqliteSaver.from_conn_string(str(DB_PATH)) as memory:
 
