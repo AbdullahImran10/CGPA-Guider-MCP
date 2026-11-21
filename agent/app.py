@@ -29,7 +29,7 @@ except (KeyError, FileNotFoundError):
 from llm import llm
 
 # Configuration
-MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://127.0.0.1:8000/mcp")
+MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "https://pucit-cgpa-guider.fastmcp.app/mcp")
 
 DB_PATH = AGENT_DIR / "memory.sqlite"
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
