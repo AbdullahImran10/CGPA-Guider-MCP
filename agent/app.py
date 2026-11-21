@@ -1,4 +1,3 @@
-
 import asyncio
 import os
 import sys
@@ -11,10 +10,9 @@ from pathlib import Path
 import streamlit as st
 
 from langchain.agents import create_agent
-from langchain.messages import HumanMessage, AIMessage
+from langchain.messages import HumanMessage, ToolMessage
 from langchain.mcp import MCPAdapter
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-
 
 # Make the agent directory accessible for imports
 AGENT_DIR = Path(__file__).resolve().parent
@@ -30,12 +28,8 @@ except (KeyError, FileNotFoundError):
 
 from llm import llm
 
-
 # Configuration
-MCP_SERVER_URL = os.getenv(
-    "MCP_SERVER_URL",
-    "http://127.0.0.1:8000/mcp"
-)
+MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://127.0.0.1:8000/mcp")
 
 DB_PATH = AGENT_DIR / "memory.sqlite"
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -65,10 +59,7 @@ def start_mcp_server():
             raise RuntimeError("MCP server stopped unexpectedly.")
 
         try:
-            with socket.create_connection(
-                ("127.0.0.1", MCP_PORT),
-                timeout=1
-            ):
+            with socket.create_connection(("127.0.0.1", MCP_PORT), timeout=1):
                 return process
 
         except OSError:
@@ -76,9 +67,7 @@ def start_mcp_server():
 
     process.terminate()
 
-    raise RuntimeError(
-        "MCP server did not start within 30 seconds."
-    )
+    raise RuntimeError("MCP server did not start within 30 seconds.")
 
 
 start_mcp_server()
@@ -106,10 +95,7 @@ Be concise and conversational.
 def create_chat_agent(tools, memory):
 
     return create_agent(
-        model=llm,
-        tools=tools,
-        system_prompt=SYSTEM_PROMPT,
-        checkpointer=memory
+        model=llm, tools=tools, system_prompt=SYSTEM_PROMPT, checkpointer=memory
     )
 
 
@@ -121,61 +107,92 @@ async def load_history(thread_id):
 
         tools = await adapter.list_tools()
 
-        async with AsyncSqliteSaver.from_conn_string(
-            str(DB_PATH)
-        ) as memory:
+        async with AsyncSqliteSaver.from_conn_string(str(DB_PATH)) as memory:
 
             app = create_chat_agent(tools, memory)
 
-            config = {
-                "configurable": {
-                    "thread_id": thread_id
-                }
-            }
+            config = {"configurable": {"thread_id": thread_id}}
 
             state = await app.aget_state(config)
 
             return state.values.get("messages", [])
 
 
+async def recover_pending_tool_calls(thread_id):
+    """Resolve unanswered tool calls left in conversation history."""
+
+    async with AsyncSqliteSaver.from_conn_string(str(DB_PATH)) as memory:
+
+        config = {"configurable": {"thread_id": thread_id}}
+
+        # Create an agent without MCP tools for recovery
+        recovery_agent = create_chat_agent([], memory)
+
+        state = await recovery_agent.aget_state(config)
+        messages = state.values.get("messages", [])
+
+        completed_ids = {
+            message.tool_call_id for message in messages if message.type == "tool"
+        }
+
+        pending_results = []
+
+        for message in messages:
+
+            if message.type == "ai":
+
+                for call in getattr(message, "tool_calls", []):
+
+                    call_id = call.get("id")
+
+                    if call_id and call_id not in completed_ids:
+
+                        pending_results.append(
+                            ToolMessage(
+                                content=(
+                                    "The MCP server is unavailable. "
+                                    "The requested tool could not be executed. "
+                                    "Inform the user and do not retry this tool."
+                                ),
+                                tool_call_id=call_id,
+                            )
+                        )
+
+                        completed_ids.add(call_id)
+
+        if not pending_results:
+            return None
+
+        # Give the model the tool error so it can respond naturally
+        result = await recovery_agent.ainvoke(
+            {"messages": pending_results}, config=config
+        )
+
+        return result["messages"]
+
+
 # Send message with error handling
+
+
 async def send_message(thread_id, user_input):
-    """Send a message to the MCP-powered agent."""
+    """Send a message to the MCP-powered agent with error recovery."""
 
     try:
-
-        # TEMPORARY TEST:
-        # Uncomment this line to simulate a 429 error.
-        # raise Exception("429 rate_limit_exceeded")
 
         async with MCPAdapter(MCP_SERVER_URL) as adapter:
 
             tools = await adapter.list_tools()
 
-            async with AsyncSqliteSaver.from_conn_string(
-                str(DB_PATH)
-            ) as memory:
+            async with AsyncSqliteSaver.from_conn_string(str(DB_PATH)) as memory:
 
                 app = create_chat_agent(tools, memory)
 
-                config = {
-                    "configurable": {
-                        "thread_id": thread_id
-                    }
-                }
+                config = {"configurable": {"thread_id": thread_id}}
 
-                print(
-                    "MCP tools available:",
-                    [tool.name for tool in tools]
-                )
+                print("MCP tools available:", [tool.name for tool in tools])
 
                 result = await app.ainvoke(
-                    {
-                        "messages": [
-                            HumanMessage(content=user_input)
-                        ]
-                    },
-                    config=config
+                    {"messages": [HumanMessage(content=user_input)]}, config=config
                 )
 
                 for message in result["messages"]:
@@ -194,29 +211,37 @@ async def send_message(thread_id, user_input):
 
         print(f"Agent error: {error}")
 
+        # Handle Groq rate limits
         if "429" in error_message or "rate_limit" in error_message:
 
             user_message = (
-                "Groq API rate limit reached. "
-                "Please wait a moment and try again."
+                "Groq API rate limit reached. " "Please wait a moment and try again."
             )
 
+        # Handle timeouts
         elif "timeout" in error_message:
 
+            user_message = "The request timed out. Please try again."
+
+        # Handle MCP connection failures
+        elif any(word in error_message for word in ["connection", "connect", "mcp"]):
+
+            try:
+
+                recovered = await recover_pending_tool_calls(thread_id)
+
+                if recovered:
+                    return recovered
+
+            except Exception as recovery_error:
+
+                print(f"Recovery error: {recovery_error}")
+
             user_message = (
-                "The request timed out. Please try again."
+                "Unable to connect to the MCP server. " "Please try again later."
             )
 
-        elif any(
-            word in error_message
-            for word in ["connection", "connect", "mcp"]
-        ):
-
-            user_message = (
-                "Unable to connect to the MCP server. "
-                "Please try again later."
-            )
-
+        # Handle unexpected errors
         else:
 
             user_message = (
@@ -224,21 +249,14 @@ async def send_message(thread_id, user_input):
                 "Please try again."
             )
 
-        return [
-            AIMessage(
-                content=user_message,
-                name="error"
-            )
-        ]
+        return [AIMessage(content=user_message, name="error")]
 
 
 # Clear conversation history
 async def clear_history(thread_id):
     """Delete a conversation from SQLite."""
 
-    async with AsyncSqliteSaver.from_conn_string(
-        str(DB_PATH)
-    ) as memory:
+    async with AsyncSqliteSaver.from_conn_string(str(DB_PATH)) as memory:
 
         await memory.adelete_thread(thread_id)
 
@@ -264,26 +282,19 @@ def get_message_text(content):
 
 
 # Streamlit interface
-st.set_page_config(
-    page_title="PUCIT GPA Assistant",
-    page_icon="🎓"
-)
+st.set_page_config(page_title="PUCIT GPA Assistant", page_icon="🎓")
 
 st.title("🎓 PUCIT GPA Assistant")
 
 st.caption(
-    "Ask about semester GPA, projected CGPA, "
-    "or the GPA required for your target."
+    "Ask about semester GPA, projected CGPA, " "or the GPA required for your target."
 )
 
 
 # User identity
 st.sidebar.header("Your conversation")
 
-username = st.sidebar.text_input(
-    "Enter your name",
-    value="Guest"
-).strip()
+username = st.sidebar.text_input("Enter your name", value="Guest").strip()
 
 if not username:
     username = "Guest"
@@ -336,9 +347,7 @@ try:
 
 except Exception as error:
 
-    st.error(
-        f"Could not connect to the MCP server or load history: {error}"
-    )
+    st.error(f"Could not connect to the MCP server or load history: {error}")
 
 
 # Chat input
@@ -356,19 +365,12 @@ if user_input:
 
             try:
 
-                response = asyncio.run(
-                    send_message(thread_id, user_input)
-                )
+                response = asyncio.run(send_message(thread_id, user_input))
 
                 # Display errors directly instead of rerunning
-                if (
-                    response
-                    and getattr(response[-1], "name", None) == "error"
-                ):
+                if response and getattr(response[-1], "name", None) == "error":
 
-                    st.error(
-                        get_message_text(response[-1].content)
-                    )
+                    st.error(get_message_text(response[-1].content))
 
                 else:
 
