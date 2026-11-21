@@ -1,4 +1,3 @@
-
 import asyncio
 import os
 import sys
@@ -16,27 +15,19 @@ from langchain.messages import HumanMessage
 from langchain.mcp import MCPAdapter
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-
 # Make the agent directory accessible for imports
 AGENT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(AGENT_DIR))
 
 try:
-    os.environ.setdefault(
-        "GROQ_API_KEY",
-        st.secrets["GROQ_API_KEY"]
-    )
+    os.environ.setdefault("GROQ_API_KEY", st.secrets["GROQ_API_KEY"])
 except (KeyError, FileNotFoundError):
     pass
 
 from llm import llm
 
-
 # Configuration
-MCP_SERVER_URL = os.getenv(
-    "MCP_SERVER_URL",
-    "http://127.0.0.1:8000/mcp"
-)
+MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://127.0.0.1:8000/mcp")
 
 DB_PATH = AGENT_DIR / "memory.sqlite"
 
@@ -58,7 +49,7 @@ def start_mcp_server():
         cwd=str(PROJECT_ROOT),
         env=env,
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL
+        stderr=subprocess.DEVNULL,
     )
 
     for _ in range(30):
@@ -66,10 +57,7 @@ def start_mcp_server():
             raise RuntimeError("MCP server stopped unexpectedly.")
 
         try:
-            with socket.create_connection(
-                ("127.0.0.1", MCP_PORT),
-                timeout=1
-            ):
+            with socket.create_connection(("127.0.0.1", MCP_PORT), timeout=1):
                 return process
         except OSError:
             time.sleep(1)
@@ -79,7 +67,6 @@ def start_mcp_server():
 
 
 start_mcp_server()
-
 
 
 SYSTEM_PROMPT = """You are a GPA/CGPA assistant for a PUCIT BS(CS) student.
@@ -101,10 +88,7 @@ Be concise and conversational.
 
 def create_chat_agent(tools, memory):
     return create_agent(
-        model=llm,
-        tools=tools,
-        system_prompt=SYSTEM_PROMPT,
-        checkpointer=memory
+        model=llm, tools=tools, system_prompt=SYSTEM_PROMPT, checkpointer=memory
     )
 
 
@@ -115,17 +99,11 @@ async def load_history(thread_id):
 
         tools = await adapter.list_tools()
 
-        async with AsyncSqliteSaver.from_conn_string(
-            str(DB_PATH)
-        ) as memory:
+        async with AsyncSqliteSaver.from_conn_string(str(DB_PATH)) as memory:
 
             app = create_chat_agent(tools, memory)
 
-            config = {
-                "configurable": {
-                    "thread_id": thread_id
-                }
-            }
+            config = {"configurable": {"thread_id": thread_id}}
 
             state = await app.aget_state(config)
 
@@ -139,33 +117,22 @@ async def send_message(thread_id, user_input):
 
         tools = await adapter.list_tools()
 
-        async with AsyncSqliteSaver.from_conn_string(
-            str(DB_PATH)
-        ) as memory:
+        async with AsyncSqliteSaver.from_conn_string(str(DB_PATH)) as memory:
 
             app = create_chat_agent(tools, memory)
 
-            config = {
-                "configurable": {
-                    "thread_id": thread_id
-                }
-            }
+            config = {"configurable": {"thread_id": thread_id}}
             print("MCP tools available:", [tool.name for tool in tools])
 
             result = await app.ainvoke(
-                {
-                    "messages": [
-                        HumanMessage(content=user_input)
-                    ]
-                },
-                config=config
+                {"messages": [HumanMessage(content=user_input)]}, config=config
             )
             for message in result["messages"]:
-             if getattr(message, "tool_calls", None):
-                print("Tool calls:", message.tool_calls)
+                if getattr(message, "tool_calls", None):
+                    print("Tool calls:", message.tool_calls)
 
-            if message.type == "tool":
-                print("Tool result:", message.content)
+                if message.type == "tool":
+                    print("Tool result:", message.content)
 
             return result["messages"]
 
@@ -173,9 +140,7 @@ async def send_message(thread_id, user_input):
 async def clear_history(thread_id):
     """Delete a conversation from SQLite."""
 
-    async with AsyncSqliteSaver.from_conn_string(
-        str(DB_PATH)
-    ) as memory:
+    async with AsyncSqliteSaver.from_conn_string(str(DB_PATH)) as memory:
 
         await memory.adelete_thread(thread_id)
 
@@ -199,26 +164,19 @@ def get_message_text(content):
 
 
 # Streamlit interface
-st.set_page_config(
-    page_title="PUCIT GPA Assistant",
-    page_icon="🎓"
-)
+st.set_page_config(page_title="PUCIT GPA Assistant", page_icon="🎓")
 
 st.title("🎓 PUCIT GPA Assistant")
 
 st.caption(
-    "Ask about semester GPA, projected CGPA, "
-    "or the GPA required for your target."
+    "Ask about semester GPA, projected CGPA, " "or the GPA required for your target."
 )
 
 
 # User identity
 st.sidebar.header("Your conversation")
 
-username = st.sidebar.text_input(
-    "Enter your name",
-    value="Guest"
-).strip()
+username = st.sidebar.text_input("Enter your name", value="Guest").strip()
 
 if not username:
     username = "Guest"
@@ -268,9 +226,7 @@ try:
 
 except Exception as e:
 
-    st.error(
-        f"Could not connect to the MCP server or load history: {e}"
-    )
+    st.error(f"Could not connect to the MCP server or load history: {e}")
 
 
 # Chat input
@@ -287,9 +243,7 @@ if user_input:
 
             try:
 
-                asyncio.run(
-                    send_message(thread_id, user_input)
-                )
+                asyncio.run(send_message(thread_id, user_input))
 
                 st.rerun()
 
