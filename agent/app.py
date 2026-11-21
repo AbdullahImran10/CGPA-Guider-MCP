@@ -1,7 +1,7 @@
+
 import asyncio
 import os
 import sys
-
 import subprocess
 import socket
 import time
@@ -11,32 +11,39 @@ from pathlib import Path
 import streamlit as st
 
 from langchain.agents import create_agent
-from langchain.messages import HumanMessage
+from langchain.messages import HumanMessage, AIMessage
 from langchain.mcp import MCPAdapter
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
 
 # Make the agent directory accessible for imports
 AGENT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(AGENT_DIR))
 
+
+# Load API key from Streamlit secrets
 try:
     os.environ.setdefault("GROQ_API_KEY", st.secrets["GROQ_API_KEY"])
 except (KeyError, FileNotFoundError):
     pass
 
+
 from llm import llm
 
+
 # Configuration
-MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://127.0.0.1:8000/mcp")
+MCP_SERVER_URL = os.getenv(
+    "MCP_SERVER_URL",
+    "http://127.0.0.1:8000/mcp"
+)
 
 DB_PATH = AGENT_DIR / "memory.sqlite"
-
-
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SERVER_SCRIPT = PROJECT_ROOT / "server" / "server.py"
 MCP_PORT = 8000
 
 
+# Start MCP server
 @st.cache_resource
 def start_mcp_server():
     """Start the MCP server once for this Streamlit process."""
@@ -53,22 +60,31 @@ def start_mcp_server():
     )
 
     for _ in range(30):
+
         if process.poll() is not None:
             raise RuntimeError("MCP server stopped unexpectedly.")
 
         try:
-            with socket.create_connection(("127.0.0.1", MCP_PORT), timeout=1):
+            with socket.create_connection(
+                ("127.0.0.1", MCP_PORT),
+                timeout=1
+            ):
                 return process
+
         except OSError:
             time.sleep(1)
 
     process.terminate()
-    raise RuntimeError("MCP server did not start within 30 seconds.")
+
+    raise RuntimeError(
+        "MCP server did not start within 30 seconds."
+    )
 
 
 start_mcp_server()
 
 
+# System prompt
 SYSTEM_PROMPT = """You are a GPA/CGPA assistant for a PUCIT BS(CS) student.
 
 Rules:
@@ -86,12 +102,18 @@ Be concise and conversational.
 """
 
 
+# Create agent
 def create_chat_agent(tools, memory):
+
     return create_agent(
-        model=llm, tools=tools, system_prompt=SYSTEM_PROMPT, checkpointer=memory
+        model=llm,
+        tools=tools,
+        system_prompt=SYSTEM_PROMPT,
+        checkpointer=memory
     )
 
 
+# Load conversation history
 async def load_history(thread_id):
     """Load saved conversation from SQLite."""
 
@@ -99,62 +121,140 @@ async def load_history(thread_id):
 
         tools = await adapter.list_tools()
 
-        async with AsyncSqliteSaver.from_conn_string(str(DB_PATH)) as memory:
+        async with AsyncSqliteSaver.from_conn_string(
+            str(DB_PATH)
+        ) as memory:
 
             app = create_chat_agent(tools, memory)
 
-            config = {"configurable": {"thread_id": thread_id}}
+            config = {
+                "configurable": {
+                    "thread_id": thread_id
+                }
+            }
 
             state = await app.aget_state(config)
 
             return state.values.get("messages", [])
 
 
+# Send message with error handling
 async def send_message(thread_id, user_input):
     """Send a message to the MCP-powered agent."""
 
-    async with MCPAdapter(MCP_SERVER_URL) as adapter:
+    try:
 
-        tools = await adapter.list_tools()
+        # TEMPORARY TEST:
+        # Uncomment this line to simulate a 429 error.
+        # raise Exception("429 rate_limit_exceeded")
 
-        async with AsyncSqliteSaver.from_conn_string(str(DB_PATH)) as memory:
+        async with MCPAdapter(MCP_SERVER_URL) as adapter:
 
-            app = create_chat_agent(tools, memory)
+            tools = await adapter.list_tools()
 
-            config = {"configurable": {"thread_id": thread_id}}
-            print("MCP tools available:", [tool.name for tool in tools])
+            async with AsyncSqliteSaver.from_conn_string(
+                str(DB_PATH)
+            ) as memory:
 
-            result = await app.ainvoke(
-                {"messages": [HumanMessage(content=user_input)]}, config=config
+                app = create_chat_agent(tools, memory)
+
+                config = {
+                    "configurable": {
+                        "thread_id": thread_id
+                    }
+                }
+
+                print(
+                    "MCP tools available:",
+                    [tool.name for tool in tools]
+                )
+
+                result = await app.ainvoke(
+                    {
+                        "messages": [
+                            HumanMessage(content=user_input)
+                        ]
+                    },
+                    config=config
+                )
+
+                for message in result["messages"]:
+
+                    if getattr(message, "tool_calls", None):
+                        print("Tool calls:", message.tool_calls)
+
+                    if message.type == "tool":
+                        print("Tool result:", message.content)
+
+                return result["messages"]
+
+    except Exception as error:
+
+        error_message = str(error).lower()
+
+        print(f"Agent error: {error}")
+
+        if "429" in error_message or "rate_limit" in error_message:
+
+            user_message = (
+                "Groq API rate limit reached. "
+                "Please wait a moment and try again."
             )
-            for message in result["messages"]:
-                if getattr(message, "tool_calls", None):
-                    print("Tool calls:", message.tool_calls)
 
-                if message.type == "tool":
-                    print("Tool result:", message.content)
+        elif "timeout" in error_message:
 
-            return result["messages"]
+            user_message = (
+                "The request timed out. Please try again."
+            )
+
+        elif any(
+            word in error_message
+            for word in ["connection", "connect", "mcp"]
+        ):
+
+            user_message = (
+                "Unable to connect to the MCP server. "
+                "Please try again later."
+            )
+
+        else:
+
+            user_message = (
+                "Something went wrong while processing your request. "
+                "Please try again."
+            )
+
+        return [
+            AIMessage(
+                content=user_message,
+                name="error"
+            )
+        ]
 
 
+# Clear conversation history
 async def clear_history(thread_id):
     """Delete a conversation from SQLite."""
 
-    async with AsyncSqliteSaver.from_conn_string(str(DB_PATH)) as memory:
+    async with AsyncSqliteSaver.from_conn_string(
+        str(DB_PATH)
+    ) as memory:
 
         await memory.adelete_thread(thread_id)
 
 
+# Convert message content into displayable text
 def get_message_text(content):
-    """Convert LangChain message content into displayable text."""
 
     if isinstance(content, str):
         return content
 
     if isinstance(content, list):
+
         parts = []
 
         for block in content:
+
             if isinstance(block, dict) and block.get("type") == "text":
                 parts.append(block.get("text", ""))
 
@@ -164,25 +264,31 @@ def get_message_text(content):
 
 
 # Streamlit interface
-st.set_page_config(page_title="PUCIT GPA Assistant", page_icon="🎓")
+st.set_page_config(
+    page_title="PUCIT GPA Assistant",
+    page_icon="🎓"
+)
 
 st.title("🎓 PUCIT GPA Assistant")
 
 st.caption(
-    "Ask about semester GPA, projected CGPA, " "or the GPA required for your target."
+    "Ask about semester GPA, projected CGPA, "
+    "or the GPA required for your target."
 )
 
 
 # User identity
 st.sidebar.header("Your conversation")
 
-username = st.sidebar.text_input("Enter your name", value="Guest").strip()
+username = st.sidebar.text_input(
+    "Enter your name",
+    value="Guest"
+).strip()
 
 if not username:
     username = "Guest"
 
 thread_id = f"streamlit:{username}"
-
 
 st.sidebar.caption(f"Conversation: {username}")
 
@@ -191,12 +297,16 @@ st.sidebar.caption(f"Conversation: {username}")
 if st.sidebar.button("Clear conversation"):
 
     try:
+
         asyncio.run(clear_history(thread_id))
+
         st.success("Conversation history cleared.")
+
         st.rerun()
 
-    except Exception as e:
-        st.error(f"Could not clear history: {e}")
+    except Exception as error:
+
+        st.error(f"Could not clear history: {error}")
 
 
 # Load and display conversation history
@@ -224,13 +334,16 @@ try:
             st.markdown(content)
 
 
-except Exception as e:
+except Exception as error:
 
-    st.error(f"Could not connect to the MCP server or load history: {e}")
+    st.error(
+        f"Could not connect to the MCP server or load history: {error}"
+    )
 
 
 # Chat input
 user_input = st.chat_input("Type your question...")
+
 
 if user_input:
 
@@ -243,10 +356,25 @@ if user_input:
 
             try:
 
-                asyncio.run(send_message(thread_id, user_input))
+                response = asyncio.run(
+                    send_message(thread_id, user_input)
+                )
 
-                st.rerun()
+                # Display errors directly instead of rerunning
+                if (
+                    response
+                    and getattr(response[-1], "name", None) == "error"
+                ):
 
-            except Exception as e:
+                    st.error(
+                        get_message_text(response[-1].content)
+                    )
 
-                st.error(f"Agent error: {e}")
+                else:
+
+                    # Successful messages are already checkpointed
+                    st.rerun()
+
+            except Exception as error:
+
+                st.error(f"Agent error: {error}")
