@@ -2,6 +2,11 @@
 import asyncio
 import os
 import sys
+
+import subprocess
+import socket
+import time
+
 from pathlib import Path
 
 import streamlit as st
@@ -16,6 +21,14 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 AGENT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(AGENT_DIR))
 
+try:
+    os.environ.setdefault(
+        "GROQ_API_KEY",
+        st.secrets["GROQ_API_KEY"]
+    )
+except (KeyError, FileNotFoundError):
+    pass
+
 from llm import llm
 
 
@@ -26,6 +39,47 @@ MCP_SERVER_URL = os.getenv(
 )
 
 DB_PATH = AGENT_DIR / "memory.sqlite"
+
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+SERVER_SCRIPT = PROJECT_ROOT / "server" / "server.py"
+MCP_PORT = 8000
+
+
+@st.cache_resource
+def start_mcp_server():
+    """Start the MCP server once for this Streamlit process."""
+
+    env = os.environ.copy()
+    env["PORT"] = str(MCP_PORT)
+
+    process = subprocess.Popen(
+        [sys.executable, str(SERVER_SCRIPT)],
+        cwd=str(PROJECT_ROOT),
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL
+    )
+
+    for _ in range(30):
+        if process.poll() is not None:
+            raise RuntimeError("MCP server stopped unexpectedly.")
+
+        try:
+            with socket.create_connection(
+                ("127.0.0.1", MCP_PORT),
+                timeout=1
+            ):
+                return process
+        except OSError:
+            time.sleep(1)
+
+    process.terminate()
+    raise RuntimeError("MCP server did not start within 30 seconds.")
+
+
+start_mcp_server()
+
 
 
 SYSTEM_PROMPT = """You are a GPA/CGPA assistant for a PUCIT BS(CS) student.
@@ -96,6 +150,7 @@ async def send_message(thread_id, user_input):
                     "thread_id": thread_id
                 }
             }
+            print("MCP tools available:", [tool.name for tool in tools])
 
             result = await app.ainvoke(
                 {
@@ -105,6 +160,12 @@ async def send_message(thread_id, user_input):
                 },
                 config=config
             )
+            for message in result["messages"]:
+             if getattr(message, "tool_calls", None):
+                print("Tool calls:", message.tool_calls)
+
+            if message.type == "tool":
+                print("Tool result:", message.content)
 
             return result["messages"]
 
